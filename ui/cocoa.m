@@ -429,21 +429,12 @@ static CGEventRef handleTapEvent(CGEventTapProxy proxy, CGEventType type, CGEven
         // selective drawing code (draws only dirty rectangles) (OS X >= 10.4)
         const NSRect *rectList;
         NSInteger rectCount;
-        int i;
-        CGImageRef clipImageRef;
-        CGRect clipRect;
 
+        // clip rather than crop: cropping rounds to whole image pixels, which
+        // mis-scales dirty rects at non-integer zoom
         [self getRectsBeingDrawn:&rectList count:&rectCount];
-        for (i = 0; i < rectCount; i++) {
-            clipRect = rectList[i];
-            clipRect.origin.y = (float)h - (clipRect.origin.y + clipRect.size.height);
-            clipImageRef = CGImageCreateWithImageInRect(
-                                                        imageRef,
-                                                        clipRect
-                                                        );
-            CGContextDrawImage (viewContextRef, cgrect(rectList[i]), clipImageRef);
-            CGImageRelease (clipImageRef);
-        }
+        CGContextClipToRects(viewContextRef, rectList, rectCount);
+        CGContextDrawImage(viewContextRef, CGRectMake(0, 0, w, h), imageRef);
         CGImageRelease (imageRef);
         CGDataProviderRelease(dataProviderRef);
     }
