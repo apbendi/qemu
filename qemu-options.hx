@@ -2261,6 +2261,7 @@ DEF("display", HAS_ARG, QEMU_OPTION_display,
     "-display cocoa[,full-grab=on|off][,swap-opt-cmd=on|off]\n"
     "              [,show-cursor=on|off][,left-command-key=on|off]\n"
     "              [,full-screen=on|off][,zoom-to-fit=on|off]\n"
+    "              [,scale=<number>]\n"
 #endif
 #if defined(CONFIG_OPENGL)
     "-display egl-headless[,rendernode=<file>]\n"
@@ -2390,6 +2391,14 @@ SRST
 
         ``zoom-to-fit=on|off`` : Expand video output to the window size,
                                  defaults to "off"
+
+        ``scale=<number>`` : Size of the window, in points per guest pixel,
+                             while zoom-to-fit is off.  On a Retina display,
+                             1 shows each guest pixel as 2x2 device pixels.
+                             Valid values are 0.25 to 4.  The View menu can
+                             zoom in and out from there in whole device
+                             pixels.  (default: one device pixel per guest
+                             pixel)
 
     ``egl-headless[,rendernode=<file>]``
         Offload all OpenGL operations to a local DRI device. For any

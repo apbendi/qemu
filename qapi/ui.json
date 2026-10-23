@@ -1448,6 +1448,11 @@
 # @zoom-interpolation: Apply interpolation to smooth output when
 #     zoom-to-fit is enabled.  Defaults to "off".  (Since 9.0)
 #
+# @scale: Size of the window, in points per guest pixel, while
+#     zoom-to-fit is off.  On a Retina display, 1.0 shows each guest
+#     pixel as 2x2 device pixels.  Valid values are 0.25 to 4.0.
+#     Defaults to one device pixel per guest pixel.  (Since 11.2)
+#
 # Since: 7.0
 ##
 { 'struct': 'DisplayCocoa',
@@ -1456,7 +1461,8 @@
       '*full-grab': 'bool',
       '*swap-opt-cmd': 'bool',
       '*zoom-to-fit': 'bool',
-      '*zoom-interpolation': 'bool'
+      '*zoom-interpolation': 'bool',
+      '*scale': 'number'
   } }
 
 ##

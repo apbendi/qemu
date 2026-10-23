@@ -101,6 +101,12 @@ static int left_command_key_enabled = 1;
 static bool swap_opt_cmd;
 
 static CGInterpolationQuality zoom_interpolation = kCGInterpolationNone;
+/*
+ * Window points per guest pixel while zoom-to-fit is off; 0 means one
+ * device pixel per guest pixel
+ */
+static CGFloat preferred_scale;
+static CGFloat fixed_scale;
 static NSTextField *pauseLabel;
 
 static bool allow_events;
@@ -486,13 +492,18 @@ static CGEventRef handleTapEvent(CGEventTapProxy proxy, CGEventType type, CGEven
     return size;
 }
 
+- (CGFloat) fixedScale
+{
+    return fixed_scale ? fixed_scale : 1 / [[self window] backingScaleFactor];
+}
+
 - (void) resizeWindow
 {
     [[self window] setContentAspectRatio:NSMakeSize(screen.width, screen.height)];
 
     if (!([[self window] styleMask] & NSWindowStyleMaskResizable)) {
-        CGFloat width = screen.width / [[self window] backingScaleFactor];
-        CGFloat height = screen.height / [[self window] backingScaleFactor];
+        CGFloat width = screen.width * [self fixedScale];
+        CGFloat height = screen.height * [self fixedScale];
 
         [[self window] setContentSize:NSMakeSize(width, height)];
         [[self window] center];
@@ -516,6 +527,7 @@ static CGEventRef handleTapEvent(CGEventTapProxy proxy, CGEventType type, CGEven
 {
     /* Must be called with the BQL, i.e. via updateUIInfo */
     NSSize frameSize;
+    CGFloat scale = 0;
     QemuUIInfo info;
 
     if (!qemu_console_is_graphic(dcl.con)) {
@@ -531,6 +543,16 @@ static CGEventRef handleTapEvent(CGEventTapProxy proxy, CGEventType type, CGEven
         CVDisplayLinkRef displayLink;
 
         frameSize = isFullscreen ? [self screenSafeAreaSize] : [self frame].size;
+
+        /*
+         * Without zoom-to-fit the window follows the guest at a fixed scale,
+         * so ask for the size that fits the window at that scale. Asking for
+         * the window's size in device pixels would make it grow forever.
+         */
+        if (!isFullscreen &&
+            !([[self window] styleMask] & NSWindowStyleMaskResizable)) {
+            scale = [self fixedScale];
+        }
 
         if (!CVDisplayLinkCreateWithCGDisplay(display, &displayLink)) {
             CVTime period = CVDisplayLinkGetNominalOutputVideoRefreshPeriod(displayLink);
@@ -552,8 +574,13 @@ static CGEventRef handleTapEvent(CGEventTapProxy proxy, CGEventType type, CGEven
 
     info.xoff = 0;
     info.yoff = 0;
-    info.width = frameSize.width * [[self window] backingScaleFactor];
-    info.height = frameSize.height * [[self window] backingScaleFactor];
+    if (scale) {
+        info.width = lround(frameSize.width / scale);
+        info.height = lround(frameSize.height / scale);
+    } else {
+        info.width = frameSize.width * [[self window] backingScaleFactor];
+        info.height = frameSize.height * [[self window] backingScaleFactor];
+    }
 
     qemu_console_set_ui_info(dcl.con, &info, TRUE);
 }
@@ -1129,6 +1156,9 @@ static CGEventRef handleTapEvent(CGEventTapProxy proxy, CGEventType type, CGEven
 - (void)doToggleFullScreen:(id)sender;
 - (void)showQEMUDoc:(id)sender;
 - (void)zoomToFit:(id) sender;
+- (void)zoomIn:(id)sender;
+- (void)zoomOut:(id)sender;
+- (void)resetZoom:(id)sender;
 - (void)displayConsole:(id)sender;
 - (void)pauseQEMU:(id)sender;
 - (void)resumeQEMU:(id)sender;
@@ -1350,6 +1380,104 @@ static CGEventRef handleTapEvent(CGEventTapProxy proxy, CGEventType type, CGEven
     [[cocoaView window] setStyleMask:styleMask];
     [sender setState:styleMask & NSWindowStyleMaskResizable ? NSControlStateValueOn : NSControlStateValueOff];
     [cocoaView resizeWindow];
+    [cocoaView updateUIInfo];
+}
+
+/* Shows guest pixels at a fixed size, which turns zoom-to-fit off */
+- (void)setFixedScale:(CGFloat)scale
+{
+    NSWindow *window = [cocoaView window];
+    NSMenu *menu = [[[NSApp mainMenu] itemWithTitle:@"View"] submenu];
+
+    fixed_scale = scale;
+    [window setStyleMask:[window styleMask] & ~NSWindowStyleMaskResizable];
+    [[menu itemWithTitle:@"Zoom To Fit"] setState:NSControlStateValueOff];
+    [cocoaView resizeWindow];
+    [cocoaView updateUIInfo];
+}
+
+/*
+ * Finds the scale one whole device pixel per guest pixel above or below the
+ * current zoom, so every step is exact. Returns 0 if there is none.
+ */
+- (CGFloat)scaleSteppedBy:(int)step
+{
+    NSWindow *window = [cocoaView window];
+    CGFloat backingScale = [window backingScaleFactor];
+    QEMUScreen guest = [cocoaView gscreen];
+    NSSize visible = [[window screen] visibleFrame].size;
+    NSRect content;
+    CGFloat pixels;
+
+    if ([window styleMask] & NSWindowStyleMaskFullScreen) {
+        return 0;
+    }
+
+    if ([window styleMask] & NSWindowStyleMaskResizable) {
+        pixels = [cocoaView frame].size.width / guest.width * backingScale;
+    } else {
+        pixels = [cocoaView fixedScale] * backingScale;
+    }
+
+    pixels = step > 0 ? floor(pixels + 0.01) + 1 : ceil(pixels - 0.01) - 1;
+    if (pixels < 1) {
+        return 0;
+    }
+
+    // don't grow the window past the screen
+    content = NSMakeRect(0, 0, guest.width * pixels / backingScale,
+                         guest.height * pixels / backingScale);
+    content = [window frameRectForContentRect:content];
+    if (step > 0 &&
+        (content.size.width > visible.width ||
+         content.size.height > visible.height)) {
+        return 0;
+    }
+
+    return pixels / backingScale;
+}
+
+- (void)zoomIn:(id)sender
+{
+    CGFloat scale = [self scaleSteppedBy:1];
+
+    if (scale) {
+        [self setFixedScale:scale];
+    }
+}
+
+- (void)zoomOut:(id)sender
+{
+    CGFloat scale = [self scaleSteppedBy:-1];
+
+    if (scale) {
+        [self setFixedScale:scale];
+    }
+}
+
+/* Returns to the scale option, or to one device pixel per guest pixel */
+- (void)resetZoom:(id)sender
+{
+    if (!([[cocoaView window] styleMask] & NSWindowStyleMaskFullScreen)) {
+        [self setFixedScale:preferred_scale];
+    }
+}
+
+/* Greys out the zoom items when they can't change the zoom */
+- (BOOL)validateMenuItem:(NSMenuItem *)menuItem
+{
+    SEL action = [menuItem action];
+
+    if (action == @selector(zoomIn:)) {
+        return [self scaleSteppedBy:1] != 0;
+    }
+    if (action == @selector(zoomOut:)) {
+        return [self scaleSteppedBy:-1] != 0;
+    }
+    if (action == @selector(resetZoom:)) {
+        return !([[cocoaView window] styleMask] & NSWindowStyleMaskFullScreen);
+    }
+    return YES;
 }
 
 - (void)toggleZoomInterpolation:(id) sender
@@ -1624,6 +1752,10 @@ static void create_initial_menus(void)
     // View menu
     menu = [[NSMenu alloc] initWithTitle:@"View"];
     [menu addItem: [[[NSMenuItem alloc] initWithTitle:@"Enter Fullscreen" action:@selector(doToggleFullScreen:) keyEquivalent:@"f"] autorelease]]; // Fullscreen
+    [menu addItem: [NSMenuItem separatorItem]];
+    [menu addItem: [[[NSMenuItem alloc] initWithTitle:@"Zoom In" action:@selector(zoomIn:) keyEquivalent:@"="] autorelease]];
+    [menu addItem: [[[NSMenuItem alloc] initWithTitle:@"Zoom Out" action:@selector(zoomOut:) keyEquivalent:@"-"] autorelease]];
+    [menu addItem: [[[NSMenuItem alloc] initWithTitle:@"Reset Zoom" action:@selector(resetZoom:) keyEquivalent:@"0"] autorelease]];
     menuItem = [[[NSMenuItem alloc] initWithTitle:@"Zoom To Fit" action:@selector(zoomToFit:) keyEquivalent:@""] autorelease];
     [menuItem setState: [[cocoaView window] styleMask] & NSWindowStyleMaskResizable ? NSControlStateValueOn : NSControlStateValueOff];
     [menu addItem: menuItem];
@@ -1986,6 +2118,18 @@ static void cocoa_display_init(DisplayState *ds, DisplayOptions *opts)
 
     if (opts->u.cocoa.has_left_command_key && !opts->u.cocoa.left_command_key) {
         left_command_key_enabled = 0;
+    }
+
+    if (opts->u.cocoa.has_scale) {
+        // same range as the GTK display
+        if (opts->u.cocoa.scale >= 0.25 && opts->u.cocoa.scale <= 4) {
+            preferred_scale = opts->u.cocoa.scale;
+            fixed_scale = preferred_scale;
+            [cocoaView resizeWindow];
+        } else {
+            error_report("Invalid scale value %lf given, being ignored",
+                         opts->u.cocoa.scale);
+        }
     }
 
     if (opts->u.cocoa.has_zoom_to_fit && opts->u.cocoa.zoom_to_fit) {
